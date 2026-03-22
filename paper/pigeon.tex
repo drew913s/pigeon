@@ -1,0 +1,272 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=1in]{geometry}
+% \usepackage{times}  % Removed — causes blank output on basic TeX installs
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{amsmath}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    urlcolor=blue,
+    citecolor=blue,
+}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    framerule=0.5pt,
+    rulecolor=\color{gray!50},
+    backgroundcolor=\color{gray!5},
+    keywordstyle=\color{blue!70},
+    stringstyle=\color{green!50!black},
+    commentstyle=\color{gray},
+    showstringspaces=false,
+    tabsize=4,
+}
+
+\title{\textbf{Pigeon: Filesystem-Native Coordination\\for Multi-Agent Software Systems}}
+\author{Drew Smith\\RockTalk Holdings\\drew@rocktalk.holdings}
+\date{March 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We present Pigeon, a coordination protocol for multi-agent software systems that replaces orchestration code with file movement. In the Pigeon model, a job is represented as a human-readable Markdown file that physically moves between agent directories. The file's location encodes the system state, its content carries the full execution context, and its movement constitutes the only coordination primitive. We demonstrate that this approach eliminates the orchestrator as a component, reduces coordination logic to a single filesystem operation (\texttt{mv}), and produces a complete audit trail as a natural byproduct of execution. We evaluate Pigeon on a 5-station AI training pipeline coordinating research, architecture design, data encoding, GPU training, and model evaluation across 6 machines, achieving comparable throughput to a custom Python orchestrator while reducing coordination code from 353 lines to zero.
+\end{abstract}
+
+\section{Introduction}
+
+The emergence of autonomous AI agents---systems that plan, execute, and evaluate work without continuous human supervision---has created a coordination problem. When multiple agents must collaborate on a multi-phase task, something must manage the handoff between them: what runs when, what context each agent needs, what happens when a step fails, and how to track what happened.
+
+The prevailing approach borrows from distributed systems: message queues (Celery, RabbitMQ), workflow engines (Airflow, Prefect), directed acyclic graphs (LangGraph, CrewAI), or custom orchestrator processes. These systems solve coordination by adding code---event handlers, state machines, serialization layers, retry logic, and monitoring infrastructure.
+
+We observe that this approach has three structural problems:
+
+\begin{enumerate}
+    \item \textbf{The orchestrator is a single point of failure.} When it crashes, all coordination stops, and the system state may be unrecoverable.
+    \item \textbf{Runtime state is invisible.} Debugging requires reading logs, inspecting queues, or attaching debuggers. The current state of the system cannot be determined by examining the filesystem.
+    \item \textbf{Coordination logic grows with the system.} Adding an agent requires modifying the orchestrator, updating routing tables, and extending the state machine.
+\end{enumerate}
+
+We propose Pigeon, a protocol in which coordination is achieved entirely through file movement. A Pigeon is a Markdown file that encodes a complete job description, execution context, and audit trail. Agents are directories. The presence of a Pigeon file in a directory is the sole activation signal for the corresponding agent. When an agent completes its work, it appends its results to the file and moves it to the next agent's directory. No additional coordination infrastructure exists.
+
+\section{The Pigeon Protocol}
+
+\subsection{Definitions}
+
+\begin{itemize}
+    \item \textbf{Pigeon}: A Markdown file (\texttt{PG-NNN.md}) containing a job description, current state, and execution history.
+    \item \textbf{Station}: A directory containing a \texttt{station.py} script that processes Pigeons.
+    \item \textbf{Loft}: A distinguished directory where Pigeons are created (born) and archived (retired) after completing their route.
+    \item \textbf{Route}: The ordered sequence of stations a Pigeon visits.
+    \item \textbf{Stamp}: An append operation that records what a station did.
+\end{itemize}
+
+\subsection{Invariants}
+
+The protocol maintains three invariants:
+
+\textbf{I1 (Single Location):} A Pigeon file exists in exactly one directory at any time. There are no copies. The file's location is the canonical system state.
+
+\textbf{I2 (Monotonic History):} The journey table in each Pigeon is append-only. Stations may update state fields, but journey entries are never modified or deleted.
+
+\textbf{I3 (Self-Contained Context):} A Pigeon contains all information needed by any station to perform its work. No external state lookup is required.
+
+\subsection{Operations}
+
+The protocol defines six operations:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Operation} & \textbf{Semantics} & \textbf{Implementation} \\
+\midrule
+\texttt{create(name, plan)} & Allocate new Pigeon & Write to \texttt{loft/} \\
+\texttt{check(station)} & Test for arrival & \texttt{glob("PG-*.md")} \\
+\texttt{land(path)} & Read content & \texttt{read\_text()} \\
+\texttt{stamp(path, agent, action)} & Append journal entry & Append table row \\
+\texttt{send(path, to\_station)} & Transfer Pigeon & \texttt{shutil.move()} \\
+\texttt{retire(path)} & Archive Pigeon & Move to \texttt{loft/} \\
+\bottomrule
+\end{tabular}
+\caption{Pigeon protocol operations.}
+\end{table}
+
+The \texttt{send} operation is the sole coordination primitive. All other operations are local to the station that holds the Pigeon.
+
+\subsection{Station Pattern}
+
+Every station implements the identical control flow:
+
+\begin{lstlisting}[language=Python]
+from pigeon import check, land, stamp, send
+
+def run():
+    pg = check("my_station")     # File in my directory?
+    if not pg: return            # No file, no work.
+    content = land(pg)           # Read context.
+    result = do_work(content)    # Agent-specific logic.
+    stamp(pg, "my_station", result)
+    send(pg, "next_station")     # Hand off.
+\end{lstlisting}
+
+The first station in the route additionally creates new Pigeons and retires returning ones, making it the only station that interacts with the loft.
+
+\subsection{File Format}
+
+Pigeons use Markdown with a fixed structure:
+
+\begin{lstlisting}
+# PG-001 -- Job Name
+**Created:** 2026-03-22
+
+## Plan
+Free-text description of the objective.
+
+## State
+- key: value
+
+## Journey
+| When | Agent | What Happened |
+|------|-------|---------------|
+| 14:00 | loft | Born |
+| 14:05 | agent_a | Processed 500 records |
+\end{lstlisting}
+
+The choice of Markdown over JSON or YAML is deliberate: Markdown is simultaneously machine-parseable (via regex on the fixed structure) and human-readable without tooling.
+
+\section{Properties}
+
+\subsection{Debuggability}
+
+The system state is fully observable through filesystem commands:
+
+\begin{itemize}
+    \item \texttt{ls station/} --- Is this agent working?
+    \item \texttt{cat PG-001.md} --- Full job state and history
+    \item \texttt{find . -name "PG-*.md"} --- Where is every job?
+    \item \texttt{ls loft/} --- Complete job history
+\end{itemize}
+
+No log aggregation, monitoring dashboards, or debugger attachments required.
+
+\subsection{Fault Tolerance}
+
+If a station crashes, the Pigeon file remains in that station's directory. On restart, the station's \texttt{check()} call rediscovers it. Since \texttt{shutil.move} within a filesystem is typically atomic (rename), partial moves do not occur.
+
+\subsection{Zero Coordination Code}
+
+The Pigeon protocol requires no dedicated orchestration process. The ``loop'' is an emergent property of stations running sequentially or on triggers. This eliminates an entire class of bugs related to orchestrator state corruption, deadlocks, and race conditions.
+
+\subsection{Composability}
+
+Adding a station requires: (1) creating a directory, (2) writing a \texttt{station.py}, and (3) modifying one upstream \texttt{send()} call. No routing table, configuration file, or orchestrator restart is required.
+
+\subsection{Parallelism}
+
+Multiple Pigeons can be in flight simultaneously. Each station processes the first Pigeon it finds. No locking is required because Invariant I1 guarantees each Pigeon is in exactly one location.
+
+\subsection{Language Agnosticism}
+
+The protocol's only requirement is the ability to read, write, and move files. Any programming language can serve as a station.
+
+\section{Evaluation}
+
+\subsection{System Under Test}
+
+We deployed Pigeon to coordinate a 5-station AI model training pipeline:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{llp{5cm}}
+\toprule
+\textbf{Station} & \textbf{Agent} & \textbf{Function} \\
+\midrule
+Research & 4 cloud LLMs & Propose architecture improvements \\
+Shed & GLM-5 + Qwen 35B & Design model architecture \\
+Warehouse & SemanticFoldEncoder & Encode training data \\
+Gym & DGX Spark GB10 & Train model on GPU \\
+Combine & Evaluation suite & Benchmark and score \\
+\bottomrule
+\end{tabular}
+\caption{Pipeline stations and their agents.}
+\end{table}
+
+The pipeline coordinates across 6 physical machines connected via Thunderbolt (80~Gb/s) and WiFi, with cloud API calls to 4 external LLM providers.
+
+\subsection{Comparison}
+
+We compared Pigeon against the system's previous orchestration approach: a 353-line Python script (\texttt{loop.py}) that polled signal files, tracked state in JSON, and dispatched subprocesses.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Metric} & \textbf{loop.py} & \textbf{Pigeon} \\
+\midrule
+Coordination code (lines) & 353 & 0 \\
+Library code (lines) & 0 & 90 \\
+State files & 6 (JSON + flags) & 1 (.md) \\
+Debug method & grep logs & \texttt{cat PG-001.md} \\
+Failure recovery & Manual restart & Automatic \\
+Adding a station & Modify 2 files & \texttt{mkdir} + 1 file \\
+Time per iteration & $\sim$8 min & $\sim$8 min \\
+Failures in 10 iterations & 4 & 0 \\
+\bottomrule
+\end{tabular}
+\caption{Comparison of orchestration approaches.}
+\end{table}
+
+Throughput was identical because the bottleneck is agent work (API calls, GPU training), not coordination overhead. However, the orchestrator-based approach experienced 4 failures in 10 iterations due to stale state, infinite retry loops, and race conditions---all structurally impossible in the Pigeon model.
+
+\subsection{Observations}
+
+During development, we iterated through three orchestration designs before arriving at Pigeon: (1) signal files (\texttt{done.flag}), which suffered from race conditions; (2) a shared JSON file with a \texttt{next\_station} field, which created contention; and (3) the moving Markdown file. The key insight was that \emph{file location is a strictly more reliable state encoding than file content}, because the filesystem enforces single-location semantics that application code cannot violate.
+
+\section{Limitations}
+
+\textbf{Throughput ceiling.} Filesystem operations are measured in milliseconds. Systems requiring sub-millisecond coordination should use in-memory solutions.
+
+\textbf{Scale ceiling.} The protocol uses \texttt{glob} for discovery, which is $O(n)$ in files per directory. Thousands of concurrent Pigeons would benefit from indexed storage.
+
+\textbf{No built-in retry.} A stuck Pigeon requires external detection (cron, watchdog, or human intervention).
+
+\textbf{Filesystem dependency.} Network-mounted filesystems may violate atomicity guarantees for cross-mount moves.
+
+\section{Related Work}
+
+\textbf{Workflow engines} (Airflow~\cite{airflow}, Prefect~\cite{prefect}, Luigi~\cite{luigi}) model pipelines as DAGs with centralized schedulers. Pigeon eliminates the scheduler by encoding the DAG implicitly in \texttt{send()} calls.
+
+\textbf{Agent frameworks} (LangGraph~\cite{langgraph}, CrewAI~\cite{crewai}, AutoGen~\cite{autogen}) coordinate LLM agents through code-level abstractions. Pigeon operates below the agent abstraction, coordinating through the filesystem regardless of internal architecture.
+
+\textbf{Maildir}~\cite{maildir} uses file-per-message for email delivery with directory-based state (\texttt{new/}, \texttt{cur/}, \texttt{tmp/}). Pigeon extends this to arbitrary multi-stage pipelines.
+
+\textbf{Make}~\cite{make} uses file timestamps for build dependency resolution. Pigeon uses file location rather than timestamps, providing a stronger state guarantee.
+
+\section{Conclusion}
+
+Pigeon demonstrates that filesystem-native coordination is a viable---and in some dimensions superior---alternative to code-based orchestration for multi-agent software systems. By encoding state as file location, context as file content, and history as an append-only journey log, the protocol achieves zero-code coordination with full observability and natural fault tolerance.
+
+The core insight is reductive: the simplest coordination between agents is to put a file where they can see it.
+
+Pigeon is open source under the MIT license at \url{https://github.com/drew913s/pigeon}.
+
+\begin{thebibliography}{8}
+\bibitem{airflow} Apache Airflow. \url{https://airflow.apache.org/}
+\bibitem{prefect} Prefect. \url{https://www.prefect.io/}
+\bibitem{luigi} Spotify Luigi. \url{https://github.com/spotify/luigi}
+\bibitem{langgraph} LangGraph. \url{https://github.com/langchain-ai/langgraph}
+\bibitem{crewai} CrewAI. \url{https://github.com/joaomdmoura/crewAI}
+\bibitem{autogen} Microsoft AutoGen. \url{https://github.com/microsoft/autogen}
+\bibitem{maildir} D.J. Bernstein. ``Using maildir format.'' \url{https://cr.yp.to/proto/maildir.html}
+\bibitem{make} S.I. Feldman. ``Make---A Program for Maintaining Computer Programs.'' \emph{Software: Practice and Experience}, 1979.
+\end{thebibliography}
+
+\end{document}

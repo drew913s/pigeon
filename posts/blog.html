@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pigeon — Agent Orchestration Without Orchestrators | RockTalk Holdings</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, system-ui, sans-serif; background: #0a0a0f; color: #c8c8d0; line-height: 1.7; }
+.container { max-width: 720px; margin: 0 auto; padding: 40px 20px; }
+h1 { color: #e8e8f0; font-size: 2.2em; margin-bottom: 8px; letter-spacing: -0.5px; }
+h2 { color: #e8e8f0; font-size: 1.4em; margin: 40px 0 16px; }
+h3 { color: #aab; font-size: 1.1em; margin: 24px 0 8px; }
+p { margin: 16px 0; color: #b0b0b8; }
+a { color: #4488ff; text-decoration: none; }
+a:hover { text-decoration: underline; }
+.subtitle { color: #666; font-size: 1.1em; margin-bottom: 40px; }
+.date { color: #555; font-size: 0.9em; }
+code { background: #1a1a2a; padding: 2px 6px; border-radius: 3px; font-family: 'SF Mono', monospace; font-size: 0.9em; color: #d0d0e0; }
+pre { background: #0d0d15; border: 1px solid #1a1a2a; border-radius: 8px; padding: 20px; overflow-x: auto; margin: 20px 0; }
+pre code { background: none; padding: 0; font-size: 0.85em; line-height: 1.5; }
+.highlight { color: #ffb300; font-weight: bold; }
+blockquote { border-left: 3px solid #ffb300; padding-left: 20px; margin: 24px 0; color: #999; font-style: italic; }
+.cta { background: #1a1a2a; border: 1px solid #2a2a3a; border-radius: 8px; padding: 24px; margin: 40px 0; text-align: center; }
+.cta a { font-size: 1.2em; color: #ffb300; }
+table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+th, td { padding: 8px 12px; border: 1px solid #1a1a2a; text-align: left; font-size: 0.9em; }
+th { background: #0d0d15; color: #aab; }
+.footer { margin-top: 60px; padding-top: 20px; border-top: 1px solid #1a1a2a; color: #444; font-size: 0.85em; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<p class="date">March 22, 2026</p>
+<h1>🕊️ Pigeon</h1>
+<p class="subtitle">Agent orchestration without orchestrators.</p>
+
+<p>Every agent framework solves coordination with more code. More abstractions. More runtime state. More invisible failure modes. Kubernetes. Airflow. Celery. LangGraph. CrewAI. Layers on layers.</p>
+
+<p>We solved it with <code>mv</code>.</p>
+
+<h2>The Idea</h2>
+
+<p>A pigeon is a <code>.md</code> file that moves between directories. Each directory is an agent. When the file lands, the agent activates. When it's done, it moves the file. <span class="highlight">That's the entire orchestration.</span></p>
+
+<pre><code>loft/           → home base (born here, retire here)
+researcher/     → station.py
+writer/         → station.py
+editor/         → station.py
+publisher/      → station.py</code></pre>
+
+<p>No orchestrator process. No message queue. No database. The file's <strong>location</strong> is the state. The file's <strong>content</strong> is the context. The file's <strong>movement</strong> is the coordination.</p>
+
+<h2>How It Works</h2>
+
+<p>Each station checks for a pigeon in its directory. If one is there, it reads it, does its work, writes what it did, and moves the file to the next station:</p>
+
+<pre><code>from pigeon import check, land, stamp, send
+
+def run():
+    pg = check("editor")          # File in my directory?
+    if not pg: return             # No file, no work.
+    content = land(pg)            # Read it.
+    # ... do your work ...
+    stamp(pg, "editor", "Fixed 3 tone issues")
+    send(pg, "reviewer")          # Move it.</code></pre>
+
+<p>Every station is this pattern. No exceptions.</p>
+
+<h2>The Pigeon File</h2>
+
+<p>Every pigeon is human-readable markdown. <code>cat</code> to debug. <code>ls loft/</code> for history.</p>
+
+<pre><code># PG-001 — Quarterly Report
+**Created:** 2026-03-22
+
+## Plan
+Research Q1 metrics, write summary, publish to blog.
+
+## State
+- articles: 12
+- approved: 11
+
+## Journey
+| When | Agent | What Happened |
+|------|-------|---------------|
+| 14:00 | loft | Born |
+| 14:01 | researcher | Found 12 topics |
+| 14:30 | writer | Wrote 12 articles |
+| 14:45 | editor | Fixed 3 tone issues |
+| 15:00 | publisher | Published 11 to prod |</code></pre>
+
+<h2>What We Replaced</h2>
+
+<table>
+<tr><th>Before</th><th>After</th></tr>
+<tr><td>Custom Python orchestrator (353 lines)</td><td>Nothing. Deleted.</td></tr>
+<tr><td>Signal files (done.flag, ready.flag)</td><td>File location IS the signal</td></tr>
+<tr><td>JSON state tracking</td><td>Markdown journey table</td></tr>
+<tr><td>Message queue between agents</td><td>Directory is the queue</td></tr>
+<tr><td>Loop.py polling every 30 seconds</td><td><code>mv</code></td></tr>
+</table>
+
+<h2>Properties</h2>
+
+<p><strong>Multiple pigeons = parallel jobs.</strong> PG-001 at editor, PG-002 at writer. Independent.</p>
+<p><strong>Remove the file = stop the job.</strong> Put it back = resume from where it stopped.</p>
+<p><strong>Add an agent.</strong> New directory, new station.py. Existing agents don't change.</p>
+<p><strong>Any language.</strong> If it can read and move files, it can be a station.</p>
+<p><strong>Git friendly.</strong> Pigeons are text files. Version history for free.</p>
+
+<h2>Where It Came From</h2>
+
+<p>We built a 5-station AI training factory — research council, architecture designer, data encoder, GPU trainer, model evaluator. 17 brain-folder agents across 6 machines. We tried orchestrator scripts, signal files, polling loops, JSON state machines. Each one added complexity. Each one broke.</p>
+
+<p>Then we asked: what's the simplest possible coordination?</p>
+
+<blockquote>Put a file where they can see it.</blockquote>
+
+<p>The pigeon pattern emerged from that question. We deleted 353 lines of orchestrator code and replaced them with <code>shutil.move()</code>. The system has been running since.</p>
+
+<h2>When NOT to Use This</h2>
+
+<p>Sub-millisecond latency. Millions of concurrent jobs. Stateless request/response. For those, use a real queue or HTTP.</p>
+
+<p>For everything else: code breaks. Files don't.</p>
+
+<div class="cta">
+<a href="https://github.com/drew913s/pigeon">GitHub: drew913s/pigeon</a>
+<p style="margin-top: 8px;">MIT Licensed. pip install pigeon-coord.</p>
+</div>
+
+<div class="footer">
+<p>RockTalk Holdings — March 2026</p>
+<p>Built by Drew with Claude. The rocks can talk.</p>
+</div>
+
+</div>
+</body>
+</html>
